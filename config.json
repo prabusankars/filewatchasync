@@ -1,0 +1,15 @@
+{
+  "watch_folders": [
+    {
+      "source_path": "/home/user/transaction/tmp/input",
+      "destination_path": "/home/user/transaction/tmp/output",
+      "file_patterns": ["*.csv", "data_*.txt","*.pdf"],
+      "recursive": true
+    }
+  ],
+  "max_concurrent_copies": 10,
+  "health_check_interval_minutes": 5,
+  "file_stability_wait_seconds": 5,
+  "csv_output_path": "/home/user/transaction/output/daily_copy/operations.csv",
+  "log_file_path": "/home/user/transaction/output/daily_logs/"
+}
