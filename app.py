@@ -30,22 +30,21 @@ def generate_random_paragraph(sentences, num_sentences):
 
 
 # print(paragraph)
-
-for i in range(0,2):
-    # unique_filename_part = str(uuid.uuid4())
-    # print(unique_filename_part)
-    fle=f"/home/user/filewatchasync/ztmp/input/data_{i}.txt"
-    if os.path.exists(fle):
-        os.remove(fle)
-    else:
-        paragraph = generate_random_paragraph(sentences, 8)
-        with open(f"/home/user/filewatchasync/ztmp/input/data_{i}.txt",'w') as wr:
-            for j in range(0,10):
-                wr.write(paragraph)
-        print(f"{i}.txt written successfully")
-    fle=f"/home/user/filewatchasync/ztmp/output/data_{i}.txt"
-    if os.path.exists(fle):
-        os.remove(fle)
+dirs=["/home/user/filewatchasync/ztmp/input","/home/user/filewatchasync/ztmp/input1"]
+for i in range(401,500):
+    for dir in dirs:
+        fle=f"{dir}/data_{i}.txt"
+        if os.path.exists(fle):
+            os.remove(fle)
+        else:
+            paragraph = generate_random_paragraph(sentences, 8)
+            with open(f"{dir}/data_{i}.txt",'w') as wr:
+                for j in range(0,10):
+                    wr.write(paragraph)
+            print(f"data_{i}.txt written successfully")
+        fle=f"{dir.replace('input','output')}/data_{i}.txt"
+        if os.path.exists(fle):
+            os.remove(fle)
     
 
 

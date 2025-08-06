@@ -23,6 +23,7 @@ pub struct Config {
     pub health_check_interval_minutes: u64,
     pub file_stability_wait_seconds: u64,
     pub csv_output_path: String,
+    pub csv_polling_time: u64,
     pub log_file_path: String,
 }
 #[derive(Clone,Debug, Eq, PartialEq, Hash)]
@@ -116,14 +117,10 @@ impl FileMonitor {
     }
 
     pub async fn start(&self) -> Result<()> {
-        info!("🚀 Starting file monitor system with Configuration: {:?}", self.config);
-        println!("🚀 Starting file monitor system with Configuration: {:?}", self.config);
-        // Initialize logging and CSV writer
         self.setup_logging().await?;
-        
+        info!("🚀 Starting file monitor system with Configuration: {:?}", self.config);
         // Start health check task
         let health_task = self.start_health_check_task();
-        
         // Start file watchers for each configured folder
         let mut watch_tasks = Vec::new();
         for watch_folder in &self.config.watch_folders {
@@ -172,46 +169,8 @@ impl FileMonitor {
     }
 
     async fn setup_logging(&self) -> Result<()> {
-        use log4rs::append::file::FileAppender;
-        use log4rs::append::console::ConsoleAppender;
-        use log4rs::config::{Appender, Config as LogConfig, Root};
-        use log4rs::encode::pattern::PatternEncoder;
-        use tracing::{debug, error, info, instrument, span, warn, Level};
         use tracing_appender::rolling::{RollingFileAppender, Rotation};
         use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
-        
-        // let logfile = FileAppender::builder()
-        //     .encoder(Box::new(PatternEncoder::new("{d(%Y-%m-%d %H:%M:%S)} [{l}] {t} - {m}\n")))
-        //     .build(&self.config.log_file_path)?;
-        // let stdout = ConsoleAppender::builder().build();
-        // // let log_line_pattern = "{d(%Y-%m-%d %H:%M:%S)} [{l}] {t} - {m}\n";
-        // // // let trigger_size = byte_unit::n_mb_bytes!(30) as u64;
-        // // let byte = Byte::from_i128_with_unit(30, Unit::MB).unwrap();
-        // // let trigger_size = byte.as_u64(); //Byte::from_f32(15000000.0).unwrap();
-        // // let trigger = Box::new(SizeTrigger::new(trigger_size));
-        // // let roller_pattern = "logs/step/step_{}.zip";
-        // // let roller_count = 5;
-        // // let roller_base = 1;
-        // // let roller = Box::new(
-        // //     FixedWindowRoller::builder()
-        // //         .base(roller_base)
-        // //         .build(roller_pattern, roller_count)
-        // //         .unwrap(),
-        // // );
-        // // let compound_policy = Box::new(CompoundPolicy::new(trigger, roller));
-        // // let step_ap = RollingFileAppender::builder()
-        // //     .encoder(Box::new(PatternEncoder::new(log_line_pattern)))
-        // //     .build("logs/step/step.log", compound_policy)
-        // //     .unwrap();
-        // let config = LogConfig::builder()
-        // .appender(Appender::builder().build("logfile", Box::new(logfile)))
-        // .appender(Appender::builder().build("stdout", Box::new(stdout)))
-        // .build(Root::builder().appender("stdout").build(log::LevelFilter::Debug))
-        // .unwrap();
-
-        // log4rs::init_config(config)?;
-
-
         let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info"));
         let filename_prefix = "file_watcher_";
@@ -230,8 +189,7 @@ impl FileMonitor {
                 .filename_suffix("log")
                 .build(&tmp_dir).unwrap()))
         .init();
-
-
+        info!("🖹 Logger Initialized");
         Ok(())
     }
 
@@ -296,8 +254,7 @@ impl FileMonitor {
         watcher.watch(watch_path, mode)
             .context(format!("Failed to start watching {}", watch_folder.source_path))?;
         
-        info!("Started watching folder: {} (recursive: {})", watch_folder.source_path, watch_folder.recursive);
-        info!("Watching for patterns: {:?}", watch_folder.file_patterns);
+        info!("👀 Started watching folder: {} , patterns:{:?} (recursive: {})", watch_folder.source_path,watch_folder.file_patterns,watch_folder.recursive);
         // Event deduplication - track recent events to avoid processing duplicates
         let mut recent_events: HashMap<PathBuf, SystemTime> = HashMap::new();
         let event_dedup_window = Duration::from_millis(500); // 500ms deduplication window
@@ -324,34 +281,31 @@ impl FileMonitor {
                         // Check for recent duplicate event
                         if let Some(&last_time) = recent_events.get(&path) {
                             if now.duration_since(last_time).unwrap_or(Duration::ZERO) <= event_dedup_window {
-                                info!("Skipping duplicate event for: {:?}", path);
+                                debug!("Skipping duplicate event for: {:?}", path);
                                 continue;
                             }
                         }
                         // Record this event
                         recent_events.insert(path.clone(), now);
-                        info!("Checking file: {:?}", path);
+                        // info!("Checking file: {:?}", path);
                         // Check if file matches any pattern
                         if Self::matches_glob_patterns(&path, &compiled_patterns) {
-                            info!("File matches pattern, checking if already processed: {:?}", path);
+                            info!("✨ File matches pattern, checking if already processed: {:?}", path);
                             // Check if already processed
                             let processed = processed_files.lock().await;
-                            // let now_systemtime = SystemTime::now();
-                            // let now_datetime: DateTime<Utc> = now_systemtime.into();
-                            // let one_minute_ago = now_datetime - chrono::Duration::minutes(1);
                             for file_info in processed.iter() {
                                 if file_info.path == path && 
                                 file_info.check_sum == Self::calculate_checksum(&path).await 
                                 {
-                                    info!("File already processed, skipping: {:?}", &path);
+                                    info!("✨ File already processed, skipping: {:?}", &path);
                                     continue;
                                 }
                             }                            
-                            info!("Adding file to pending queue: {:?}", path);
+                            info!("✚  Adding file to pending queue: {:?}", path);
                             let mut pending = pending_files.lock().await;
                             pending.insert(path.clone(), now);
                         } else {
-                            info!("File does not match any patterns: {:?}", path);
+                            info!("❗  File does not match any patterns: {:?}", path);
                         }
                     }
                 }
@@ -381,7 +335,7 @@ impl FileMonitor {
             }
         }
         
-        warn!("File watcher event loop ended for {}", watch_folder.source_path);
+        warn!("❗ File watcher event loop ended for {}", watch_folder.source_path);
         Ok(())
     }
 
@@ -470,14 +424,13 @@ impl FileMonitor {
                     
                     stable_files
                 };
-                
+                                
                 for file_path in files_to_process {
                     let semaphore = Arc::clone(&semaphore);
+                    let config = config.clone();
                     let processed_files = Arc::clone(&processed_files);
                     let copied_files = Arc::clone(&copied_files);
                     let health_status = Arc::clone(&health_status);
-                    let config = config.clone();
-                    
                     tokio::spawn(async move {
                         let _permit = semaphore.acquire().await.unwrap();
                         
@@ -503,17 +456,6 @@ impl FileMonitor {
             }
         })
     }
-    
-    // fn format_timestamp(time: SystemTime) -> String {
-    //     let duration = time.duration_since(UNIX_EPOCH).unwrap_or_default();
-    //     let secs = duration.as_secs();
-    //     let millis = duration.subsec_millis();
-        
-    //     // Simple timestamp format: YYYY-MM-DD HH:MM:SS.mmm
-    //     let dt = chrono::DateTime::from_timestamp(secs as i64, millis * 1_000_000)
-    //         .unwrap_or_default();
-    //     dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string()
-    // }
 
     async fn process_file(
         source_path: &PathBuf,
@@ -564,7 +506,7 @@ impl FileMonitor {
         match fs::copy(&source_path, &dest_path).await {
             Ok(_) => {
                 record.status = "success".to_string();
-                info!("Successfully copied file: {:?} -> {:?}", source_path, dest_path);
+                info!("🗹  Successfully copied file: {:?} -> {:?}", source_path, dest_path);
                 record.des_check_sum = Some(Self::calculate_checksum(&dest_path).await);
                 record.end_timestamp = Some(Utc::now().to_rfc3339());
                 // Update health status
@@ -574,7 +516,7 @@ impl FileMonitor {
             Err(e) => {
                 record.status = "error".to_string();
                 record.error_message = Some(e.to_string());
-                error!("Failed to copy file: {:?} -> {:?}, error: {}", source_path, dest_path, e);
+                error!("🗷  Failed to copy file: {:?} -> {:?}, error: {}", source_path, dest_path, e);
                 
                 // Update health status
                 let mut health = health_status.write().await;
@@ -601,26 +543,26 @@ impl FileMonitor {
     fn start_health_check_task(&self) -> tokio::task::JoinHandle<()> {
         let health_status = Arc::clone(&self.health_status);
         let interval_minutes = self.config.health_check_interval_minutes;
-        
+        let processed_files = Arc::clone(&self.processed_files);        
         tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(interval_minutes * 60));
             
             loop {
                 interval.tick().await;
-                
+                let processed_files = Arc::clone(&processed_files);
+                let mut processed = processed_files.lock().await;
+                processed.clear();
                 let mut health = health_status.write().await;
                 let now = Utc::now();
-                
                 // Simple health check logic
-                health.is_healthy = health.errors_last_period < health.files_processed_last_period / 2;
+                health.is_healthy = !health.errors_last_period > 0;
                 
                 info!(
-                    "Health check - Processed: {}, Errors: {}, Healthy: {}",
+                    "💓 Health check Files since last health check - Processed: {}, Errors: {}, Healthy: {}",
                     health.files_processed_last_period,
                     health.errors_last_period,
                     health.is_healthy
                 );
-                
                 // Reset counters
                 health.files_processed_last_period = 0;
                 health.errors_last_period = 0;
@@ -628,9 +570,6 @@ impl FileMonitor {
             }
         })
     }
-    // fn get_csv_path(base_path: &Path, date: &str) -> PathBuf {
-    //     base_path.with_extension(format!("{}.csv", date))
-    // }
     
     fn get_today_csv_path(base_path: String, date: &str) -> String {
         format!("{}.{}.csv", base_path, date)
@@ -648,6 +587,7 @@ impl FileMonitor {
     fn start_csv_writer(&self) -> tokio::task::JoinHandle<()> {
         let copied_files = Arc::clone(&self.copied_files);
         let mut csv_path = self.config.csv_output_path.clone();
+        let csv_polling_time = self.config.csv_polling_time;
         csv_path = FileMonitor::get_today_csv_path(csv_path, &Utc::now().format("%Y-%m-%d").to_string());
         let csv_file_path = Path::new(&csv_path);
         if let Some(parent_dir) = &csv_file_path.parent() {
@@ -659,24 +599,28 @@ impl FileMonitor {
         } 
             
         tokio::spawn(async move {
-            let mut interval = interval(Duration::from_secs(10));
+            let mut interval = interval(Duration::from_secs(csv_polling_time));
             let mut last_written = 0;
             
             loop {
                 interval.tick().await;
-                
+                debug!("Copied data pushed to CSV:{}",last_written);
                 let records = {
-                    let copied = copied_files.read().await;
-                    if copied.len() > last_written {
-                        let new_records = copied[last_written..].to_vec();
-                        last_written = copied.len();
-                        new_records
-                    } else {
-                        continue;
-                    }
+                    let mut copied = copied_files.write().await;
+                    // if copied.len() > last_written {
+                    //     let new_records = copied[last_written..].to_vec();
+                    //     last_written = copied.len();
+                    //     new_records
+                    // } else {
+                    //     continue;
+                    // }
+                    let new_records = copied[0..].to_vec();
+                    last_written = copied.len();
+                    copied.clear();
+                    new_records
                 };
                 
-                if let Err(e) = Self::write_csv_records(&csv_path, &records, last_written == records.len()).await {
+                if let Err(e) = Self::write_csv_records(&csv_path, &records, last_written == 0).await {
                     error!("Failed to write CSV records: {}", e);
                 }
             }
@@ -739,7 +683,7 @@ impl FileMonitor {
     }
 
     async fn shutdown(&self) -> Result<()> {
-        info!("Shutting down file monitor system");
+        info!("🛑 Shutting down file monitor system");
         
         // // Write any remaining records to CSV
         // let records = {
@@ -751,7 +695,7 @@ impl FileMonitor {
         //     Self::write_csv_records(&self.config.csv_output_path, &records, true).await?;
         // }
         
-        info!("Shutdown complete");
+        // info!("Shutdown complete");
         Ok(())
     }
 }
@@ -766,7 +710,7 @@ async fn main() -> Result<()> {
     let config: Config = serde_json::from_str(&config_content)
         .context("Failed to parse configuration file")?;
     
-    println!("Loaded configuration: {:?}", config);
+    // println!("Loaded configuration: {:?}", config);
     // Create and start the file monitor
     let monitor = FileMonitor::new(config)?;
     monitor.start().await?;
@@ -779,13 +723,13 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
     
-    #[test]
-    fn test_pattern_matching() {
-        let path = Path::new("/test/file.txt");
-        // assert!(FileMonitor::matches_patterns(path, &["*.txt".to_string()]));
-        // assert!(FileMonitor::matches_patterns(path, &["file.txt".to_string()]));
-        // assert!(!FileMonitor::matches_patterns(path, &["*.pdf".to_string()]));
-    }
+    // #[test]
+    // fn test_pattern_matching() {
+    //     let path = Path::new("/test/file.txt");
+    //     // assert!(FileMonitor::matches_patterns(path, &["*.txt".to_string()]));
+    //     // assert!(FileMonitor::matches_patterns(path, &["file.txt".to_string()]));
+    //     // assert!(!FileMonitor::matches_patterns(path, &["*.pdf".to_string()]));
+    // }
     
     #[tokio::test]
     async fn test_file_completeness() {

@@ -16,6 +16,8 @@
     pkgs.rustup
     pkgs.python3
     pkgs.python311Packages.pip
+    pkgs.valgrind
+    pkgs.massif-visualizer
   ];
 
   # Sets environment variables in the workspace
