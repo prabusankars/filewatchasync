@@ -1,21 +1,20 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime,UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 use glob::Pattern;
 use tokio::fs;
 use tokio::sync::{Mutex, RwLock, Semaphore};
 use tokio::time::{interval, sleep};
 use tokio::signal;
 use serde::{Deserialize, Serialize};
-use notify::{Watcher, RecursiveMode, Event, EventKind};
+use notify::{Watcher, RecursiveMode,EventKind};
 use notify::event::{CreateKind, ModifyKind};
 use csv::Writer;
 use log::{info, warn, error, debug};
 use anyhow::{Result, Context};
 use clap::Parser;
 use chrono::{DateTime, Utc};
-use std::convert::TryInto;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -117,8 +116,8 @@ impl FileMonitor {
     }
 
     pub async fn start(&self) -> Result<()> {
-        info!("Starting file monitor system");
-        println!("Configuration: {:?}", self.config);
+        info!("🚀 Starting file monitor system with Configuration: {:?}", self.config);
+        println!("🚀 Starting file monitor system with Configuration: {:?}", self.config);
         // Initialize logging and CSV writer
         self.setup_logging().await?;
         
@@ -138,12 +137,24 @@ impl FileMonitor {
         // Start CSV writer task
         let csv_writer_task = self.start_csv_writer();
         
-        info!("All tasks started successfully");
+        info!("✅ All tasks started successfully");
         
         // Wait for Ctrl+C
         tokio::select! {
             _ = signal::ctrl_c() => {
-                info!("Received Ctrl+C, shutting down gracefully...");
+                info!("⚠️  Received Ctrl+C, waiting for pending files to process...");
+                
+                // Give the processor a chance to pick up any files added just before Ctrl+C
+                tokio::time::sleep(Duration::from_secs(self.config.file_stability_wait_seconds + 2)).await;
+                // Wait for the pending files queue to be empty
+                loop {
+                    let pending_count = self.pending_files.lock().await.len();
+                    if pending_count == 0 {
+                        break;
+                    }
+                    info!("{} files still pending processing...", pending_count);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
             }
             _ = health_task => {
                 error!("Health check task terminated unexpectedly");
@@ -324,10 +335,10 @@ impl FileMonitor {
                         if Self::matches_glob_patterns(&path, &compiled_patterns) {
                             info!("File matches pattern, checking if already processed: {:?}", path);
                             // Check if already processed
-                            let mut processed = processed_files.lock().await;
-                            let now_systemtime = SystemTime::now();
-                            let now_datetime: DateTime<Utc> = now_systemtime.into();
-                            let one_minute_ago = now_datetime - chrono::Duration::minutes(1);
+                            let processed = processed_files.lock().await;
+                            // let now_systemtime = SystemTime::now();
+                            // let now_datetime: DateTime<Utc> = now_systemtime.into();
+                            // let one_minute_ago = now_datetime - chrono::Duration::minutes(1);
                             for file_info in processed.iter() {
                                 if file_info.path == path && 
                                 file_info.check_sum == Self::calculate_checksum(&path).await 
@@ -492,16 +503,17 @@ impl FileMonitor {
             }
         })
     }
-    fn format_timestamp(time: SystemTime) -> String {
-        let duration = time.duration_since(UNIX_EPOCH).unwrap_or_default();
-        let secs = duration.as_secs();
-        let millis = duration.subsec_millis();
+    
+    // fn format_timestamp(time: SystemTime) -> String {
+    //     let duration = time.duration_since(UNIX_EPOCH).unwrap_or_default();
+    //     let secs = duration.as_secs();
+    //     let millis = duration.subsec_millis();
         
-        // Simple timestamp format: YYYY-MM-DD HH:MM:SS.mmm
-        let dt = chrono::DateTime::from_timestamp(secs as i64, millis * 1_000_000)
-            .unwrap_or_default();
-        dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string()
-    }
+    //     // Simple timestamp format: YYYY-MM-DD HH:MM:SS.mmm
+    //     let dt = chrono::DateTime::from_timestamp(secs as i64, millis * 1_000_000)
+    //         .unwrap_or_default();
+    //     dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string()
+    // }
 
     async fn process_file(
         source_path: &PathBuf,
@@ -616,9 +628,9 @@ impl FileMonitor {
             }
         })
     }
-    fn get_csv_path(base_path: &Path, date: &str) -> PathBuf {
-        base_path.with_extension(format!("{}.csv", date))
-    }
+    // fn get_csv_path(base_path: &Path, date: &str) -> PathBuf {
+    //     base_path.with_extension(format!("{}.csv", date))
+    // }
     
     fn get_today_csv_path(base_path: String, date: &str) -> String {
         format!("{}.{}.csv", base_path, date)
@@ -642,16 +654,10 @@ impl FileMonitor {
             if !parent_dir.exists() {
                 println!("Dir not exists: {:?}",parent_dir);
                 // let _ = fs::create_dir_all(parent_dir); // Create the directory asynchronously
-                FileMonitor::create_directory(parent_dir.to_path_buf());
+                let _ = FileMonitor::create_directory(parent_dir.to_path_buf());
             }
         } 
-        // if !tmp_path.exists() {
-        //     async()||->({
-        //         fs::create_dir_all(&tmp_path).await;
-        //     });
-        //     println!("Folder created successfully: {}", csv_path.to_string());
-        // } 
-        
+            
         tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(10));
             let mut last_written = 0;
@@ -735,15 +741,15 @@ impl FileMonitor {
     async fn shutdown(&self) -> Result<()> {
         info!("Shutting down file monitor system");
         
-        // Write any remaining records to CSV
-        let records = {
-            let copied = self.copied_files.read().await;
-            copied.clone()
-        };
+        // // Write any remaining records to CSV
+        // let records = {
+        //     let copied = self.copied_files.read().await;
+        //     copied.clone()
+        // };
         
-        if !records.is_empty() {
-            Self::write_csv_records(&self.config.csv_output_path, &records, true).await?;
-        }
+        // if !records.is_empty() {
+        //     Self::write_csv_records(&self.config.csv_output_path, &records, true).await?;
+        // }
         
         info!("Shutdown complete");
         Ok(())
