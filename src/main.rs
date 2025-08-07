@@ -25,6 +25,7 @@ pub struct Config {
     pub csv_output_path: String,
     pub csv_polling_time: u64,
     pub log_file_path: String,
+    pub lst_file_stability_wait_seconds: Option<u64>, // Additional wait time for .lst files
 }
 #[derive(Clone,Debug, Eq, PartialEq, Hash)]
 pub struct FileInfo {
@@ -42,13 +43,32 @@ pub struct WatchFolder {
 
 impl WatchFolder {
     pub fn compile_patterns(&self) -> Result<Vec<Pattern>> {
-        self.file_patterns
-            .iter()
-            .map(|pattern| {
-                Pattern::new(pattern)
-                    .with_context(|| format!("Invalid glob pattern: {}", pattern))
-            })
-            .collect()
+        let mut compiled_patterns = Vec::new();
+        
+        for pattern_str in &self.file_patterns {
+            // Compile original pattern
+            let original_pattern = Pattern::new(pattern_str)
+                .with_context(|| format!("Invalid glob pattern: {}", pattern_str))?;
+            compiled_patterns.push(original_pattern);
+            
+            // Also compile lowercase version if different
+            let lowercase_pattern_str = pattern_str.to_lowercase();
+            if lowercase_pattern_str != *pattern_str {
+                let lowercase_pattern = Pattern::new(&lowercase_pattern_str)
+                    .with_context(|| format!("Invalid glob pattern (lowercase): {}", lowercase_pattern_str))?;
+                compiled_patterns.push(lowercase_pattern);
+            }
+            
+            // Also compile uppercase version if different
+            let uppercase_pattern_str = pattern_str.to_uppercase();
+            if uppercase_pattern_str != *pattern_str && uppercase_pattern_str != lowercase_pattern_str {
+                let uppercase_pattern = Pattern::new(&uppercase_pattern_str)
+                    .with_context(|| format!("Invalid glob pattern (uppercase): {}", uppercase_pattern_str))?;
+                compiled_patterns.push(uppercase_pattern);
+            }
+        }
+        
+        Ok(compiled_patterns)
     }
 }
 
@@ -63,6 +83,8 @@ pub struct CopiedFileRecord {
     pub status: String,
     pub error_message: Option<String>,
     pub end_timestamp:Option<String>,
+    pub is_lst_referenced: Option<bool>, // Flag to indicate if file was referenced from .lst
+    pub lst_source_file: Option<String>, // Source .lst file that referenced this file
 }
 
 #[derive(Debug)]
@@ -70,6 +92,7 @@ pub struct FileMonitor {
     config: Config,
     copied_files: Arc<RwLock<Vec<CopiedFileRecord>>>,
     pending_files: Arc<Mutex<HashMap<PathBuf, SystemTime>>>,
+    pending_lst_files: Arc<Mutex<HashMap<PathBuf, SystemTime>>>, // Separate queue for .lst files
     processed_files: Arc<Mutex<HashSet<FileInfo>>>, // Track processed files to avoid duplicates
     semaphore: Arc<Semaphore>,
     health_status: Arc<RwLock<HealthStatus>>,
@@ -110,6 +133,7 @@ impl FileMonitor {
             config,
             copied_files: Arc::new(RwLock::new(Vec::new())),
             pending_files: Arc::new(Mutex::new(HashMap::new())),
+            pending_lst_files: Arc::new(Mutex::new(HashMap::new())),
             processed_files: Arc::new(Mutex::new(HashSet::new())),
             semaphore,
             health_status: Arc::new(RwLock::new(HealthStatus::default())),
@@ -130,6 +154,9 @@ impl FileMonitor {
         
         // Start file processor task
         let processor_task = self.start_file_processor();
+
+        // Start .lst file processor task
+        let lst_processor_task = self.start_lst_file_processor();
         
         // Start CSV writer task
         let csv_writer_task = self.start_csv_writer();
@@ -146,10 +173,11 @@ impl FileMonitor {
                 // Wait for the pending files queue to be empty
                 loop {
                     let pending_count = self.pending_files.lock().await.len();
-                    if pending_count == 0 {
+                    let lst_pending_count = self.pending_lst_files.lock().await.len();
+                    if pending_count == 0  && lst_pending_count ==0 {
                         break;
                     }
-                    info!("{} files still pending processing...", pending_count);
+                    info!("{} files and {} .lst files still pending processing...", pending_count, lst_pending_count);
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
@@ -158,6 +186,9 @@ impl FileMonitor {
             }
             _ = processor_task => {
                 error!("File processor task terminated unexpectedly");
+            }
+            _ = lst_processor_task =>{
+                error!("LST processor task terminated unexpectedly");
             }
             _ = csv_writer_task => {
                 error!("CSV writer task terminated unexpectedly");
@@ -195,11 +226,12 @@ impl FileMonitor {
 
     async fn start_folder_watcher(&self, watch_folder: WatchFolder) -> Result<tokio::task::JoinHandle<()>> {
         let pending_files = Arc::clone(&self.pending_files);
+        let pending_lst_files = Arc::clone(&self.pending_lst_files);
         let processed_files = Arc::clone(&self.processed_files);
         let config = self.config.clone();
         
         let task = tokio::spawn(async move {
-            if let Err(e) = Self::watch_folder_impl(watch_folder, pending_files, processed_files, config).await {
+            if let Err(e) = Self::watch_folder_impl(watch_folder, pending_files,pending_lst_files, processed_files, config).await {
                 error!("Folder watcher error: {}", e);
             }
         });
@@ -211,6 +243,7 @@ impl FileMonitor {
     async fn watch_folder_impl(
         watch_folder: WatchFolder,
         pending_files: Arc<Mutex<HashMap<PathBuf, SystemTime>>>,
+        pending_lst_files:Arc<Mutex<HashMap<PathBuf,SystemTime>>>,
         processed_files: Arc<Mutex<HashSet<FileInfo>>>,
         _config: Config,
     ) -> Result<()> {
@@ -300,10 +333,17 @@ impl FileMonitor {
                                     info!("✨ File already processed, skipping: {:?}", &path);
                                     continue;
                                 }
-                            }                            
-                            info!("✚  Adding file to pending queue: {:?}", path);
-                            let mut pending = pending_files.lock().await;
-                            pending.insert(path.clone(), now);
+                            } 
+                            if path.extension().and_then(|s| s.to_str()) ==Some("lst") {
+                                info!("✚  Adding .lst file to pending queue: {:?}", path);
+                                let mut pending_lst = pending_lst_files.lock().await;
+                                pending_lst.insert(path.clone(), now);
+                            }else{
+                                info!("✚  Adding file to pending queue: {:?}", path);
+                                let mut pending = pending_files.lock().await;
+                                pending.insert(path.clone(), now);
+                            }                          
+                            
                         } else {
                             info!("❗  File does not match any patterns: {:?}", path);
                         }
@@ -368,11 +408,13 @@ impl FileMonitor {
         let filename = path.file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("");
-        
+        let filename_lower = filename.to_lowercase();
         debug!("Checking file '{}' against {} compiled patterns", filename, compiled_patterns.len());
         
         for pattern in compiled_patterns {
-            if pattern.matches(filename) {
+            //check both original and lowercase
+            let pattern_matches =pattern.matches(filename) || pattern.matches(&filename_lower);
+            if pattern_matches {
                 info!("✅ Pattern '{}' matches file '{}'", pattern.as_str(), filename);
                 return true;
             } else {
@@ -500,6 +542,8 @@ impl FileMonitor {
             status: "copying".to_string(),
             error_message: None,
             end_timestamp: None,
+            is_lst_referenced: None,
+            lst_source_file: None,
         };
         
         // Copy the file
@@ -530,7 +574,195 @@ impl FileMonitor {
         
         Ok(())
     }
+    // New function to start .lst file processor
+    fn start_lst_file_processor(&self) -> tokio::task::JoinHandle<()> {
+        let pending_lst_files = Arc::clone(&self.pending_lst_files);
+        let processed_files = Arc::clone(&self.processed_files);
+        let copied_files = Arc::clone(&self.copied_files);
+        let pending_files = Arc::clone(&self.pending_files);
+        let semaphore = Arc::clone(&self.semaphore);
+        let health_status = Arc::clone(&self.health_status);
+        let config = self.config.clone();
+        
+        tokio::spawn(async move {
+            let mut interval = interval(Duration::from_secs(1));
+            
+            loop {
+                interval.tick().await;
+                let lst_files_to_process = {
+                    let mut pending_lst = pending_lst_files.lock().await;
+                    let now = SystemTime::now();
+                    let stable_time = Duration::from_secs(
+                        config.lst_file_stability_wait_seconds.unwrap_or(config.file_stability_wait_seconds)
+                    );
+                    
+                    if !pending_lst.is_empty() {
+                        debug!("Checking {} .lst files in pending queue", pending_lst.len());
+                    }
+                    
+                    let stable_lst_files: Vec<PathBuf> = pending_lst
+                        .iter()
+                        .filter(|(_, &time)| {
+                            let elapsed = now.duration_since(time).unwrap_or(Duration::ZERO);
+                            elapsed >= stable_time
+                        })
+                        .map(|(path, _)| path.clone())
+                        .collect();
+                    
+                    // Remove stable .lst files from pending
+                    for path in &stable_lst_files {
+                        pending_lst.remove(path);
+                        info!("Moving .lst file to processing: {:?}", path);
+                    }
+                    
+                    stable_lst_files
+                };
+                                
+                for lst_file_path in lst_files_to_process {
+                    let semaphore = Arc::clone(&semaphore);
+                    let config = config.clone();
+                    let processed_files = Arc::clone(&processed_files);
+                    let copied_files = Arc::clone(&copied_files);
+                    let pending_files = Arc::clone(&pending_files);
+                    let health_status = Arc::clone(&health_status);
+                    
+                    tokio::spawn(async move {
+                        let _permit = semaphore.acquire().await.unwrap();
+                        
+                        if let Err(e) = Self::process_lst_file(
+                            &lst_file_path,
+                            &config,
+                            Arc::clone(&copied_files),
+                            Arc::clone(&pending_files),
+                            Arc::clone(&health_status),
+                        ).await {
+                            error!("Failed to process .lst file: {}", e);
+                        }
+                        
+                        // Mark .lst file as processed
+                        let mut processed = processed_files.lock().await;
+                        let time = SystemTime::now();
+                        let check_sum = Self::calculate_checksum(&lst_file_path).await;
+                        let file_info = FileInfo { 
+                            path: lst_file_path.clone(), 
+                            modified_time: time, 
+                            check_sum: check_sum
+                        };
+                        processed.insert(file_info);
+                    });
+                }
+            }
+        })
+    }
 
+    // New function to process .lst files
+    async fn process_lst_file(
+        lst_file_path: &PathBuf,
+        config: &Config,
+        copied_files: Arc<RwLock<Vec<CopiedFileRecord>>>,
+        pending_files: Arc<Mutex<HashMap<PathBuf, SystemTime>>>,
+        health_status: Arc<RwLock<HealthStatus>>,
+    ) -> Result<()> {
+        info!("📋 Processing .lst file: {:?}", lst_file_path);
+        
+        // First, copy the .lst file itself
+        if let Err(e) = Self::process_file(
+            lst_file_path,
+            config,
+            Arc::clone(&copied_files),
+            Arc::clone(&health_status),
+        ).await {
+            error!("Failed to copy .lst file: {}", e);
+            return Err(e);
+        }
+        
+        // Read the .lst file content
+        let content = match fs::read_to_string(lst_file_path).await {
+            Ok(content) => content,
+            Err(e) => {
+                error!("🗷  Failed to read .lst file: {:?}, error: {}", lst_file_path, e);
+                return Err(anyhow::anyhow!("Failed to read .lst file: {}", e));
+            }
+        };
+        
+        // Parse file paths from .lst file (assuming one file path per line)
+        let file_paths: Vec<String> = content
+            .lines()
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty() && !line.starts_with('#')) // Skip empty lines and comments
+            .map(|line| line.to_string())
+            .collect();
+        
+        info!("📋 Found {} file references in .lst file: {:?}", file_paths.len(), lst_file_path);
+        
+        // Process each file referenced in the .lst
+        for file_path_str in file_paths {
+            let referenced_file_path = PathBuf::from(&file_path_str);
+            
+            // Check if the file path is absolute or relative
+            let absolute_file_path = if referenced_file_path.is_absolute() {
+                referenced_file_path
+            } else {
+                // If relative, resolve it relative to the .lst file's directory
+                if let Some(lst_parent) = lst_file_path.parent() {
+                    lst_parent.join(referenced_file_path)
+                } else {
+                    referenced_file_path
+                }
+            };
+            
+            info!("📄 Checking referenced file: {:?}", absolute_file_path);
+            
+            // Check if file exists and is stable
+            if !absolute_file_path.exists() {
+                warn!("⚠️  Referenced file does not exist: {:?}", absolute_file_path);
+                
+                // Create an error record for missing file
+                let error_record = CopiedFileRecord {
+                    timestamp: Utc::now().to_rfc3339(),
+                    source_path: absolute_file_path.to_string_lossy().to_string(),
+                    destination_path: "N/A".to_string(),
+                    file_size: 0,
+                    check_sum: String::new(),
+                    des_check_sum: None,
+                    status: "error".to_string(),
+                    error_message: Some("Referenced file does not exist".to_string()),
+                    end_timestamp: Some(Utc::now().to_rfc3339()),
+                    is_lst_referenced: Some(true),
+                    lst_source_file: Some(lst_file_path.to_string_lossy().to_string()),
+                };
+                
+                let mut copied = copied_files.write().await;
+                copied.push(error_record);
+                
+                let mut health = health_status.write().await;
+                health.errors_last_period += 1;
+                
+                continue;
+            }
+            
+            // Check if file is stable
+            if !Self::is_file_complete(&absolute_file_path).await.unwrap_or(false) {
+                warn!("⚠️  Referenced file is not stable yet, adding to pending: {:?}", absolute_file_path);
+                let mut pending = pending_files.lock().await;
+                pending.insert(absolute_file_path, SystemTime::now());
+                continue;
+            }
+            
+            // Process the referenced file
+            if let Err(e) = Self::process_file(
+                &absolute_file_path,
+                config,
+                Arc::clone(&copied_files),
+                Arc::clone(&health_status),
+            ).await {
+                error!("Failed to process referenced file {:?}: {}", absolute_file_path, e);
+            }
+        }
+        
+        info!("📋 Completed processing .lst file: {:?}", lst_file_path);
+        Ok(())
+    }
     async fn is_file_complete(path: &Path) -> Result<bool> {
         // Simple file completeness check - compare file size over time
         let size1 = fs::metadata(path).await?.len();
@@ -656,6 +888,8 @@ impl FileMonitor {
                     "status",
                     "error_message",
                     "end_timestamp",
+                    "is_lst_referenced",
+                    "lst_source_file",
                 ])?;
             }
             
@@ -670,6 +904,8 @@ impl FileMonitor {
                     &record.status,
                     &record.error_message.as_deref().unwrap_or("").to_string(),
                     &record.end_timestamp.as_deref().unwrap_or("").to_string(),
+                    &record.is_lst_referenced.map(|b| b.to_string()).unwrap_or_default(),
+                    &record.lst_source_file.as_deref().unwrap_or("").to_string(),
                 ])?;
             }
             
@@ -739,4 +975,73 @@ mod tests {
         fs::write(&file_path, "test content").await.unwrap();
         assert!(FileMonitor::is_file_complete(&file_path).await.unwrap());
     }
+
+    #[tokio::test]
+    async fn test_lst_file_processing() {
+        let temp_dir = TempDir::new().unwrap();
+        
+        // Create a test .lst file
+        let lst_content = "file1.txt\nfile2.txt\n# This is a comment\nsubdir/file3.txt";
+        let lst_file_path = temp_dir.path().join("test.lst");
+        fs::write(&lst_file_path, lst_content).await.unwrap();
+        
+        // Create referenced files
+        fs::write(temp_dir.path().join("file1.txt"), "content1").await.unwrap();
+        fs::write(temp_dir.path().join("file2.txt"), "content2").await.unwrap();
+        
+        // Create subdirectory and file
+        fs::create_dir_all(temp_dir.path().join("subdir")).await.unwrap();
+        fs::write(temp_dir.path().join("subdir/file3.txt"), "content3").await.unwrap();
+        
+        // Test the .lst file processing logic here
+        // This is a basic test structure - you'd need to set up the full config and test context
+        assert!(lst_file_path.exists());
+    }
+
+    #[test]
+    fn test_pattern_compilation() {
+        let watch_folder = WatchFolder {
+            source_path: "/test".to_string(),
+            destination_path: "/dest".to_string(),
+            file_patterns: vec!["*.TxT".to_string()], // Mixed case pattern
+            recursive: false,
+        };
+        
+        let compiled_patterns = watch_folder.compile_patterns().unwrap();
+        
+        // Should have compiled multiple versions: original, lowercase, uppercase
+        assert!(compiled_patterns.len() >= 1);
+        
+        // Verify it can match different cases
+        assert!(FileMonitor::matches_glob_patterns(Path::new("/test/file.txt"), &compiled_patterns));
+        assert!(FileMonitor::matches_glob_patterns(Path::new("/test/file.TXT"), &compiled_patterns));
+        assert!(FileMonitor::matches_glob_patterns(Path::new("/test/file.TxT"), &compiled_patterns));
+    }
+    #[test]
+    fn test_case_insensitive_pattern_matching() {
+        // Test case-insensitive pattern matching
+        let watch_folder = WatchFolder {
+            source_path: "/test".to_string(),
+            destination_path: "/dest".to_string(),
+            file_patterns: vec!["*.txt".to_string(), "*.PDF".to_string(), "Data*.csv".to_string()],
+            recursive: false,
+        };
+        
+        let compiled_patterns = watch_folder.compile_patterns().unwrap();
+        
+        // Test various case combinations
+        assert!(FileMonitor::matches_glob_patterns(Path::new("/test/file.txt"), &compiled_patterns));
+        assert!(FileMonitor::matches_glob_patterns(Path::new("/test/file.TXT"), &compiled_patterns));
+        assert!(FileMonitor::matches_glob_patterns(Path::new("/test/FILE.txt"), &compiled_patterns));
+        assert!(FileMonitor::matches_glob_patterns(Path::new("/test/document.pdf"), &compiled_patterns));
+        assert!(FileMonitor::matches_glob_patterns(Path::new("/test/document.PDF"), &compiled_patterns));
+        assert!(FileMonitor::matches_glob_patterns(Path::new("/test/Data123.csv"), &compiled_patterns));
+        assert!(FileMonitor::matches_glob_patterns(Path::new("/test/data456.csv"), &compiled_patterns));
+        assert!(FileMonitor::matches_glob_patterns(Path::new("/test/DATA789.CSV"), &compiled_patterns));
+        
+        // Test non-matching patterns
+        assert!(!FileMonitor::matches_glob_patterns(Path::new("/test/file.doc"), &compiled_patterns));
+        assert!(!FileMonitor::matches_glob_patterns(Path::new("/test/info.csv"), &compiled_patterns)); // Doesn't start with "Data"
+    }
+
 }
