@@ -3,7 +3,7 @@
     {
       "source_path": "/home/user/filewatchasync/ztmp/input",
       "destination_path": "/home/user/filewatchasync/ztmp/output",
-      "file_patterns": ["*.csv", "data_*.txt","*.pdf"],
+      "file_patterns": ["*.csv", "data_*.txt","*.pdf","*.lst"],
       "recursive": true
     },
     {
@@ -15,7 +15,7 @@
   ],
   "max_concurrent_copies": 5,
   "health_check_interval_minutes": 5,
-  "file_stability_wait_seconds": 3,
+  "file_stability_wait_seconds": 5,
   "lst_file_stability_wait_seconds": 10,
   "csv_output_path": "/home/user/filewatchasync/ztmp/daily_copy/operations.csv",
   "csv_polling_time":20,

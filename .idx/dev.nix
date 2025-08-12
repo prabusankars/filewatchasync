@@ -11,6 +11,7 @@
     # pkgs.python311Packages.pip
     # pkgs.nodejs_20
     # pkgs.nodePackages.nodemon
+    pkgs.go
     pkgs.sudo
     pkgs.gcc
     pkgs.rustup
