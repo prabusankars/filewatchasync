@@ -1,4 +1,5 @@
 import os
+import sys
 # import shutil
 import random
 import uuid
@@ -29,22 +30,63 @@ def generate_random_paragraph(sentences, num_sentences):
     return "\n".join(random_sentences)
 
 
-# print(paragraph)
-dirs=["/home/user/filewatchasync/ztmp/input"]
-for i in range(401,405):
+def create(dirs,count):
     for dir in dirs:
-        fle=f"{dir}/data_{i}.txt"
-        if os.path.exists(fle):
-            os.remove(fle)
-        else:
+        for i in range(int(count)):
+            fle=f"{dir}/data_{i}.txt"
             paragraph = generate_random_paragraph(sentences, 8)
             with open(f"{dir}/data_{i}.txt",'w') as wr:
-                for j in range(0,100000):
+                for j in range(0,100):
                     wr.write(paragraph)
             print(f"data_{i}.txt written successfully")
-        fle=f"{dir.replace('input','output')}/data_{i}.txt"
-        if os.path.exists(fle):
-            os.remove(fle)
+def delete(dirs):
+    for dir in dirs:
+        for dirpath, dirnames, filenames in os.walk(os.path.dirname(dir)):
+            for fle in filenames:
+                if fle.endswith(".txt"):
+                    os.remove(os.path.join(dirpath,fle))
+                    print(f"{fle} deleted.")
+        # fle=f"{dir}/data_{i}.txt"
+        # if os.path.exists(fle):
+        #     os.remove(fle)
+        # else:
+        #     print(f"data_{i}.txt does not exist")
+
+
+args = sys.argv
+key="create"
+count = 2
+if len(args) > 1:
+    key=args[1]
+if len(args) > 2:
+    count=args[2]
+print(key,count)
+dirs=["/home/user/filewatchasync/ztmp/input"]
+
+if key=="create":
+    create(dirs,count)
+else:
+    delete(dirs)
+
+# for dirpath, dirnames, filenames in os.walk(ip_folder):
+#     for fle in filenames:
+#         print(fle)
+
+# for i in range(401,403):
+#     for dir in dirs:
+        
+#         fle=f"{dir}/data_{i}.txt"
+#         if os.path.exists(fle):
+#             os.remove(fle)
+#         else:
+#             paragraph = generate_random_paragraph(sentences, 8)
+#             with open(f"{dir}/data_{i}.txt",'w') as wr:
+#                 for j in range(0,100000):
+#                     wr.write(paragraph)
+#             print(f"data_{i}.txt written successfully")
+#         fle=f"{dir.replace('input','output')}/data_{i}.txt"
+#         if os.path.exists(fle):
+#             os.remove(fle)
     
 
 

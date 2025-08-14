@@ -272,8 +272,8 @@ impl FileMonitor {
                             processed.remove(&file_info);
                         }
                         // processed.remove(path);
-                        let mut pending = pending_files.lock().await;
-                        pending.remove(path);
+                        // let mut pending = pending_files.lock().await;
+                        // pending.remove(path);
                     }
                 }
                 _ => {
@@ -405,7 +405,34 @@ impl FileMonitor {
             }
         })
     }
+    async fn add_file_not_found_error(
+        source_path: &PathBuf,
+        copied_files: Arc<RwLock<Vec<CopiedFileRecord>>>,
+        health_status: Arc<RwLock<HealthStatus>>,
+    )->Result<()>{
+        let start_time = Utc::now();
+        let file_size = 0;
+        let record = CopiedFileRecord {
+            timestamp: start_time.to_rfc3339(),
+            source_path: source_path.to_string_lossy().to_string(),
+            destination_path: "NA".to_string(),
+            file_size,
+            check_sum: None,
+            des_check_sum: None,
+            status: "failed".to_string(),
+            error_message: Some("File not found in the location".to_string()),
+            end_timestamp: None,
+            is_lst_referenced: None,
+            lst_source_file: None,
+        };
+        let mut copied = copied_files.write().await;
+        copied.push(record);
+        let mut health = health_status.write().await;
+        health.errors_last_period += 1;
 
+        Ok(())
+
+    }
     async fn process_file(
         source_path: &PathBuf,
         config: &Config,
@@ -420,6 +447,13 @@ impl FileMonitor {
             .iter()
             .find(|wf| source_path.starts_with(&wf.source_path))
             .context("No matching watch folder found")?;
+
+        let src_file = Path::new(&source_path);
+        if !src_file.exists(){
+            warn!("File does not exist: {:?}", source_path);
+            Self::add_file_not_found_error(source_path,copied_files,health_status).await?;
+            return Ok(());
+        }
         
         // Validate file is complete and not being written to
         if !Self::is_file_complete(&source_path).await? {
@@ -444,7 +478,7 @@ impl FileMonitor {
             source_path: source_path.to_string_lossy().to_string(),
             destination_path: dest_path.to_string_lossy().to_string(),
             file_size,
-            check_sum: Self::calculate_checksum(&source_path).await,
+            check_sum: Some(Self::calculate_checksum(&source_path).await),
             des_check_sum: None,
             status: "copying".to_string(),
             error_message: None,
@@ -481,6 +515,7 @@ impl FileMonitor {
         
         Ok(())
     }
+    
     // New function to start .lst file processor
     fn start_lst_file_processor(&self) -> tokio::task::JoinHandle<()> {
         let pending_lst_files = Arc::clone(&self.pending_lst_files);
@@ -630,7 +665,7 @@ impl FileMonitor {
                     source_path: absolute_file_path.to_string_lossy().to_string(),
                     destination_path: "N/A".to_string(),
                     file_size: 0,
-                    check_sum: String::new(),
+                    check_sum: None,
                     des_check_sum: None,
                     status: "error".to_string(),
                     error_message: Some("Referenced file does not exist".to_string()),
@@ -806,7 +841,7 @@ impl FileMonitor {
                     &record.source_path,
                     &record.destination_path,
                     &record.file_size.to_string(),
-                    &record.check_sum,
+                    &record.check_sum.as_ref().unwrap_or(&String::new()).to_string(),
                     &record.des_check_sum.as_ref().unwrap_or(&String::new()).to_string(),
                     &record.status,
                     &record.error_message.as_deref().unwrap_or("").to_string(),

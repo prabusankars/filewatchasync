@@ -6,7 +6,7 @@ pub struct CopiedFileRecord {
     pub source_path: String,
     pub destination_path: String,
     pub file_size: u64,
-    pub check_sum: String,
+    pub check_sum: Option<String>,
     pub des_check_sum: Option<String>,
     pub status: String,
     pub error_message: Option<String>,
